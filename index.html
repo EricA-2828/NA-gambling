@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>NP予想システム - Last Result Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-app.js";
+        import { getDatabase, ref, set, onValue, update, get, remove } from "https://www.gstatic.com/firebasejs/10.7.1/firebase-database.js";
+
+        // --- Firebase設定 ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyBZ0r2_JIJ1Ua4qjCKccoH3VJPIPCDkvDs",
+            authDomain: "npgambling-bc6e5.firebaseapp.com",
+            databaseURL: "https://npgambling-bc6e5-default-rtdb.firebaseio.com/",
+            projectId: "npgambling-bc6e5",
+            storageBucket: "npgambling-bc6e5.firebasestorage.app",
+            messagingSenderId: "285005663209",
+            appId: "1:285005663209:web:7d06f232cb2aa7583f5978"
+        };
+
+        const app = initializeApp(firebaseConfig);
+        const db = getDatabase(app);
+
+        let currentUser = null;
+        let users = {};
+        let gameState = {};
+        let votes = {};
+        const ADMIN_PASS = "admin123";
+
+        window.login = async () => {
+            const name = document.getElementById('name').value.trim();
+            const pass = document.getElementById('pass').value.trim();
+            if(!name || !pass) return alert("名前とパスワードを入れてね");
+
+            const userRef = ref(db, 'users/' + name);
+            const snapshot = await get(userRef);
+            if (snapshot.exists()) {
+                if (snapshot.val().password !== pass) return alert("パスワードが違います！");
+            } else {
+                await set(userRef, { password: pass, points: 10000, stars: 0 });
+            }
+            currentUser = name;
+            document.getElementById('login-div').classList.add('hidden');
+            document.getElementById('main-div').classList.remove('hidden');
+            render();
+        };
+
+        window.manualRefresh = () => { render(); };
+
+        onValue(ref(db), (snap) => {
+            const data = snap.val() || {};
+            users = data.users || {};
+            gameState = data.gameState || { status: 'idle', carryover: 0 };
+            votes = data.votes || {};
+            render();
+            if (currentUser && gameState.lastResult && !gameState.lastResult.readBy?.[currentUser]) {
+                showResultModal();
+            }
+        });
+
+        function render() {
+            if(!currentUser) return;
+            const u = users[currentUser] || { points: 0, stars: 0 };
+            
+            document.getElementById('status-name').innerText = currentUser;
+            document.getElementById('status-points').innerText = Number(u.points).toLocaleString() + " NP";
+            document.getElementById('status-stars').innerText = '★'.repeat(u.stars);
+            
+            const sorted = Object.entries(users).sort((a,b) => b[1].points - a[1].points);
+            document.getElementById('ranking').innerHTML = sorted.map(([n, d]) => 
+                `<div class="flex justify-between border-b py-2 ${n === currentUser ? 'bg-blue-50 font-bold' : ''}">
+                    <span>${'★'.repeat(d.stars)}${n}</span>
+                    <span>${Number(d.points).toLocaleString()} NP</span>
+                </div>`
+            ).join('');
+
+            const g = document.getElementById('game-area');
+            const adminResolveArea = document.getElementById('admin-resolve-buttons');
+            const adminOddsView = document.getElementById('admin-odds-view');
+
+            if(gameState.status === 'voting') {
+                const currentTotalVotes = Object.values(votes).reduce((a, b) => a + Number(b.amount), 0);
+                const totalPool = currentTotalVotes + (Number(gameState.carryover) || 0);
+                const participantCount = Object.keys(votes).length;
+
+                let html = `<div class="bg-white p-6 rounded-[2.5rem] shadow-xl border-t-8 border-blue-600 animate-fade-in">`;
+                html += `<h2 class="text-2xl font-black mb-4 text-gray-800 leading-tight">${gameState.title}</h2>`;
+                html += `
+                <div class="grid grid-cols-2 gap-3 mb-6">
+                    <div class="bg-gray-50 p-4 rounded-2xl border border-gray-100 text-center">
+                        <p class="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">Total Pool</p>
+                        <p class="text-xl font-black text-blue-600">${totalPool.toLocaleString()}</p>
+                    </div>
+                    <div class="bg-gray-50 p-4 rounded-2xl border border-gray-100 text-center">
+                        <p class="text-[9px] font-bold text-gray-400 uppercase tracking-widest mb-1">Players</p>
+                        <p class="text-xl font-black text-gray-700">${participantCount}</p>
+                    </div>
+                </div>`;
+                
+                if(Number(u.points) > 0) {
+                    html += `<input type="number" id="amount" class="w-full border-2 border-gray-100 p-4 rounded-2xl mb-6 outline-none focus:border-blue-500 font-bold text-center transition" placeholder="ポイントを入力">`;
+                } else {
+                    html += `<div class="bg-red-50 text-red-500 p-4 rounded-2xl mb-6 text-center font-bold text-xs">借金モード</div>`;
+                }
+                
+                html += `<div class="space-y-3">`;
+                gameState.options.forEach((opt, i) => {
+                    const isVoted = votes[currentUser] && votes[currentUser].option === i;
+                    html += `
+                        <button onclick="vote(${i})" class="w-full p-5 rounded-2xl font-black transition-all ${isVoted ? 'bg-green-500 text-white shadow-inner' : 'bg-white border-2 border-blue-600 text-blue-600 hover:bg-blue-600 hover:text-white shadow-md active:scale-95'}">
+                            ${opt} ${isVoted ? ' (Voted)' : ''}
+                        </button>`;
+                });
+                html += `</div></div>`;
+                g.innerHTML = html;
+
+                // 管理者画面
+                adminOddsView.innerHTML = `<div class="grid grid-cols-2 gap-2 mb-4">${gameState.options.map((opt, i) => `<div class="bg-white p-2 rounded-lg border border-red-100 text-[10px]"><span class="text-gray-400 block">${opt}</span><span class="font-black text-red-500">x${gameState.odds[i]}</span></div>`).join('')}</div>`;
+                adminResolveArea.innerHTML = gameState.options.map((opt, i) => `<button onclick="adminResult(${i})" class="bg-green-600 text-white p-3 rounded-xl font-bold text-[10px] shadow-md">「${opt}」を正解にする</button>`).join('');
+
+            } else {
+                // 待機中：前回の結果を表示
+                let html = `<div class="bg-gray-100 rounded-[2.5rem] p-12 text-center font-bold text-gray-400 border-4 border-dashed border-gray-200 uppercase tracking-tighter mb-6">Waiting for Host...</div>`;
+                
+                if (gameState.lastResult) {
+                    html += `
+                    <div class="bg-white p-8 rounded-[2.5rem] shadow-lg border-t-8 border-yellow-500 animate-fade-in">
+                        <h3 class="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-4">前回 の 結果</h3>
+                        <p class="text-sm text-gray-400 font-bold mb-1 italic">Winner</p>
+                        <p class="text-2xl font-black text-gray-800 mb-2 leading-tight">${gameState.lastResult.winnerName}</p>
+                        <p class="text-lg font-black text-yellow-600">Odds: x${gameState.lastResult.odds}</p>
+                        <div class="mt-6 pt-4 border-t border-gray-50 flex justify-between items-center text-[10px] font-bold text-gray-400 uppercase">
+                            <span>Winners Count</span>
+                            <span class="text-gray-600">${gameState.lastResult.winners ? gameState.lastResult.winners.length : 0} People</span>
+                        </div>
+                    </div>`;
+                }
+                g.innerHTML = html;
+                adminOddsView.innerHTML = "";
+                adminResolveArea.innerHTML = `<p class="text-xs text-gray-400 text-center py-4 italic">お題を出すとボタンが出ます</p>`;
+            }
+
+            if (!document.getElementById('admin-area').classList.contains('hidden')) { renderAdminUserList(); }
+        }
+
+        window.vote = async (idx) => {
+            if(gameState.status !== 'voting' || (votes && votes[currentUser])) return;
+            const myPoints = Number(users[currentUser].points);
+            let amount = 0;
+            if (myPoints > 0) {
+                amount = (myPoints < 1000) ? myPoints : Number(document.getElementById('amount')?.value || 0);
+                if (myPoints >= 1000 && (isNaN(amount) || amount < 1000)) return alert("1,000以上かけてね");
+                if (amount > myPoints) return alert("不足");
+            }
+            await set(ref(db, 'votes/' + currentUser), { option: idx, amount: amount });
+        };
+
+        window.adminStart = async () => {
+            const title = document.getElementById('new-title').value;
+            const opts = document.getElementById('new-options').value.split(',').map(s => s.trim());
+            const oddsInput = document.getElementById('new-odds').value.trim();
+            const odds = oddsInput === "" ? opts.map(() => 2.0) : oddsInput.split(',').map(s => Number(s.trim()) || 2.0);
+            if(!title || opts.length < 1) return alert("入力不足");
+            await update(ref(db, 'gameState'), { status: 'voting', title, options: opts, odds, lastResult: gameState.lastResult });
+            await set(ref(db, 'votes'), {});
+        };
+
+        window.adminResult = async (winIdx) => {
+            if(!confirm("確定？")) return;
+            const winners = Object.entries(votes).filter(([n, v]) => v.option === winIdx);
+            const odds = Number(gameState.odds[winIdx]);
+            const updates = {};
+            let resultData = { winnerName: gameState.options[winIdx], odds: odds, winners: winners.map(w => ({ name: w[0] })) };
+            const winnerTotalBet = winners.reduce((sum, [n, v]) => sum + (Number(users[n].points) <= 0 ? 1000 : Number(v.amount)), 0);
+            const pool = (Number(gameState.carryover) || 0) + Object.values(votes).reduce((a, b) => a + Number(b.amount), 0);
+
+            for (let [name, user] of Object.entries(users)) {
+                let p = Number(user.points);
+                let s = Number(user.stars);
+                const v = votes[name];
+                if (v && v.option === winIdx) {
+                    const bet = p <= 0 ? 1000 : Number(v.amount);
+                    const coShare = winnerTotalBet > 0 ? Math.floor((bet / winnerTotalBet) * (Number(gameState.carryover) || 0)) : 0;
+                    p += Math.floor(bet * odds) + coShare + (p <= 0 ? 1000 : 0);
+                } else if (v) {
+                    const loss = p <= 0 ? 1000 : Number(v.amount);
+                    if (p > 0 && p - loss <= 0) s++;
+                    p -= loss;
+                }
+                updates[`users/${name}/points`] = p;
+                updates[`users/${name}/stars`] = s;
+            }
+            updates['gameState/status'] = 'idle';
+            updates['gameState/carryover'] = winners.length === 0 ? pool : 0;
+            updates['gameState/lastResult'] = resultData;
+            updates['votes'] = null;
+            await update(ref(db), updates);
+        };
+
+        window.adminNoGame = async () => {
+            if(!confirm("返還？")) return;
+            const updates = {};
+            for (let [name, v] of Object.entries(votes)) { updates[`users/${name}/points`] = Number(users[name].points) + Number(v.amount); }
+            updates['gameState/status'] = 'idle';
+            updates['votes'] = null;
+            await update(ref(db), updates);
+        };
+
+        function renderAdminUserList() {
+            const list = document.getElementById('admin-user-list');
+            list.innerHTML = Object.keys(users).map(name => `<div class="flex justify-between items-center bg-white p-3 mb-2 rounded-xl text-xs border font-bold"><span>${name}</span><button onclick="deleteUser('${name}')" class="text-red-500 bg-red-50 px-3 py-1 rounded-lg">削除</button></div>`).join('');
+        }
+        window.deleteUser = async (name) => { if(confirm(`${name}削除？`)) await remove(ref(db, 'users/' + name)); };
+        function showResultModal() {
+            const res = gameState.lastResult;
+            const winners = res.winners || [];
+            const isWinner = winners.some(w => w.name === currentUser);
+            document.getElementById('res-option').innerText = res.winnerName;
+            document.getElementById('res-odds').innerText = res.odds;
+            document.getElementById('res-points').innerText = isWinner ? "YOU WIN!" : "LOSE";
+            document.getElementById('res-points').className = isWinner ? "text-4xl font-black text-yellow-500" : "text-4xl font-black text-gray-400";
+            document.getElementById('result-modal').classList.remove('hidden');
+        }
+        window.closeResult = async () => { document.getElementById('result-modal').classList.add('hidden'); await set(ref(db, `gameState/lastResult/readBy/${currentUser}`), true); };
+        window.unlockAdmin = () => { if (document.getElementById('admin-pass').value === ADMIN_PASS) { document.getElementById('admin-area').classList.remove('hidden'); renderAdminUserList(); } };
+    </script>
+</head>
+<body class="bg-gray-50 min-h-screen pb-20 font-sans">
+
+    <div id="login-div" class="max-w-md mx-auto pt-20 px-4">
+        <div class="bg-white p-12 rounded-[3.5rem] shadow-2xl text-center">
+            <h1 class="text-6xl font-black text-blue-600 mb-2 tracking-tighter">NPG</h1>
+            <p class="text-gray-400 text-[10px] font-black tracking-[0.4em] mb-12 uppercase">みんなで　賭けチャオウ</p>
+            <input id="name" type="text" placeholder="名前" class="w-full p-5 bg-gray-50 rounded-2xl mb-4 outline-none font-bold text-center border-2 border-transparent focus:border-blue-100 transition">
+            <input id="pass" type="password" placeholder="パスワード" class="w-full p-5 bg-gray-50 rounded-2xl mb-10 outline-none font-bold text-center border-2 border-transparent focus:border-blue-100 transition">
+            <button onclick="login()" class="w-full bg-blue-600 text-white p-6 rounded-3xl font-black text-2xl shadow-xl transition active:scale-95">LOGIN</button>
+        </div>
+    </div>
+
+    <div id="main-div" class="max-w-md mx-auto hidden p-4">
+        <div class="bg-gradient-to-br from-blue-700 to-blue-500 text-white p-10 rounded-[3rem] shadow-2xl mb-8 relative overflow-hidden">
+            <div class="flex justify-between items-start relative z-10">
+                <div>
+                    <p id="status-name" class="text-xs font-bold opacity-60 uppercase mb-2"></p>
+                    <h2 id="status-points" class="text-5xl font-black tracking-tighter mb-2"></h2>
+                    <div id="status-stars" class="text-yellow-300 text-3xl tracking-[0.2em]"></div>
+                </div>
+                <button onclick="manualRefresh()" class="bg-white/20 p-3 rounded-2xl text-[10px] font-bold hover:bg-white/30 transition">🔄</button>
+            </div>
+            <div class="absolute right-[-30px] bottom-[-30px] text-white/5 text-[12rem] font-black italic select-none">NP</div>
+        </div>
+
+        <div id="game-area" class="mb-8"></div>
+
+        <div class="bg-white p-10 rounded-[3rem] shadow-xl border border-gray-100">
+            <div class="flex justify-between items-center mb-8">
+                <h3 class="font-black text-gray-400 text-xs uppercase tracking-widest italic tracking-tighter">Leaderboard</h3>
+                <button onclick="manualRefresh()" class="text-[10px] text-blue-400 font-bold uppercase">Refresh</button>
+            </div>
+            <div id="ranking" class="space-y-2"></div>
+        </div>
+
+        <div class="mt-16 p-8 border-t-2 border-dashed border-gray-200">
+            <div class="flex gap-2 mb-6">
+                <input id="admin-pass" type="password" placeholder="Host Key" class="border p-4 rounded-2xl text-xs w-full bg-white shadow-inner outline-none">
+                <button onclick="unlockAdmin()" class="bg-gray-800 text-white px-8 rounded-2xl text-xs font-bold shadow-lg">解除</button>
+            </div>
+            
+            <div id="admin-area" class="hidden p-8 bg-red-50 rounded-[3rem] border-4 border-red-100 space-y-8 animate-fade-in">
+                <div class="space-y-3">
+                    <p class="text-[10px] font-black text-red-400 uppercase tracking-widest">New Bet</p>
+                    <input id="new-title" type="text" placeholder="お題" class="w-full p-4 rounded-2xl border text-sm font-bold">
+                    <input id="new-options" type="text" placeholder="選択肢 (A,B,C)" class="w-full p-4 rounded-2xl border text-sm font-bold">
+                    <div class="flex gap-2">
+                        <input id="new-odds" type="text" placeholder="倍率 (空白なら2倍)" class="flex-1 p-4 rounded-2xl border text-sm font-bold">
+                    </div>
+                    <button onclick="adminStart()" class="w-full bg-red-500 text-white p-5 rounded-2xl font-black shadow-xl">開始</button>
+                </div>
+                <div class="space-y-3 border-t border-red-100 pt-6">
+                    <p class="text-[10px] font-black text-red-400 uppercase tracking-widest">Settlement</p>
+                    <div id="admin-odds-view"></div>
+                    <div id="admin-resolve-buttons" class="grid grid-cols-1 gap-2"></div>
+                    <button onclick="adminNoGame()" class="w-full bg-gray-400 text-white p-3 rounded-2xl font-black text-[10px] mt-4 shadow-sm">返還</button>
+                </div>
+                <div id="admin-user-list" class="pt-6 border-t border-red-100"></div>
+            </div>
+        </div>
+    </div>
+
+    <div id="result-modal" class="fixed inset-0 bg-black/95 backdrop-blur-xl flex items-center justify-center hidden z-50 p-6">
+        <div class="bg-white w-full max-w-sm rounded-[4rem] p-12 text-center shadow-2xl animate-pop">
+            <h2 class="text-4xl font-black text-gray-900 mb-2">RESULT</h2>
+            <p id="res-option" class="text-4xl font-black text-blue-600 mb-8"></p>
+            <div class="bg-blue-50 rounded-[2.5rem] p-10 mb-10">
+                <p class="text-[10px] text-blue-400 font-black mb-2 uppercase">Payout x<span id="res-odds"></span></p>
+                <p id="res-points" class=""></p>
+            </div>
+            <button onclick="closeResult()" class="w-full bg-gray-900 text-white p-6 rounded-[2rem] font-black text-2xl shadow-xl active:scale-95 transition">OK</button>
+        </div>
+    </div>
+
+    <style>
+        @keyframes pop { 0% { transform: scale(0.8); opacity: 0; } 100% { transform: scale(1); opacity: 1; } }
+        @keyframes fade-in { 0% { opacity: 0; transform: translateY(10px); } 100% { opacity: 1; transform: translateY(0); } }
+        .animate-pop { animation: pop 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275); }
+        .animate-fade-in { animation: fade-in 0.4s ease-out; }
+    </style>
+</body>
+</html>
